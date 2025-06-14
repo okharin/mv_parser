@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  fastapi:
+    build: .
+    ports:
+      - "7000:7000"
+    volumes:
+      - ./app:/app/app
+      - ./data:/app/data
+      - ./logs:/app/logs
+    restart: unless-stopped 
