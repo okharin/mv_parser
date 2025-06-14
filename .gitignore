@@ -45,4 +45,9 @@ chromedriver.exe
 
 # Results and cache
 results.json
-.cache/ 
+.cache/
+
+# Data files
+data/product_links.json
+data/parsing_status.json
+data/url_update_status.json 
