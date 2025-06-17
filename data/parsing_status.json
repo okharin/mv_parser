@@ -1,0 +1,12 @@
+{
+  "status": "completed",
+  "last_run": null,
+  "next_run": null,
+  "total_products": 10,
+  "processed_products": 243,
+  "errors": 0,
+  "start_time": "2025-06-17 00:04:33.242179",
+  "end_time": "2025-06-17 00:06:20.686042",
+  "heartbeat": "2025-06-17 00:06:20.686080",
+  "current_category": "sistemnyi-blok-mini"
+}
