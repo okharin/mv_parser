@@ -38,6 +38,15 @@ class Parser:
         self.init_driver_pool()
         # Настройка форматирования логгера уже происходит в app.core.logging
 
+        # Загружаем ранее обработанные URL при старте
+        try:
+            if os.path.exists('data/processed_urls.json'):
+                with open('data/processed_urls.json', 'r', encoding='utf-8') as f:
+                    self.processed_urls = set(json.load(f))
+                logger.info(f"Загружено {len(self.processed_urls)} ранее обработанных URL")
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке обработанных URL: {str(e)}")
+
     def init_driver_pool(self):
         """Инициализирует пул драйверов"""
         for _ in range(settings.DRIVER_POOL_SIZE):
@@ -215,6 +224,34 @@ class Parser:
             logger.error(f"Ошибка при получении списка URL товаров из файла: {str(e)}")
             return []
 
+    def process_duplicate_characteristics(self, characteristics: Dict[str, Dict[str, str]]) -> Dict[str, Dict[str, str]]:
+        """Обработка дублирующихся названий характеристик - добавляет цифры к дублирующимся названиям"""
+        processed_characteristics = {}
+        all_used_names = set()  # Отслеживаем все использованные названия во всех группах
+        
+        for group_name, group_specs in characteristics.items():
+            processed_group = {}
+            
+            for spec_name, spec_value in group_specs.items():
+                original_name = spec_name
+                counter = 1
+                
+                # Если название уже использовано в любой группе, добавляем цифру
+                while spec_name in all_used_names:
+                    spec_name = f"{original_name} {counter}"
+                    counter += 1
+                
+                # Логируем, если название было изменено
+                if spec_name != original_name:
+                    logger.info(f"Дублирующееся название характеристики '{original_name}' переименовано в '{spec_name}' (значение: {spec_value})")
+                
+                all_used_names.add(spec_name)
+                processed_group[spec_name] = spec_value
+            
+            processed_characteristics[group_name] = processed_group
+        
+        return processed_characteristics
+
     def extract_product_info(self, driver: webdriver.Chrome, url: str) -> Optional[Dict]:
         """Извлечение информации о товаре"""
         thread_id = get_thread_id()
@@ -336,34 +373,40 @@ class Parser:
                         continue
                 
                 if gallery:
-                    # Пробуем разные селекторы для изображений
-                    img_selectors = [
+                    # Ищем изображения в галерее
+                    image_selectors = [
                         "img[src*='.jpg']",
-                        "img[src*='.jpeg']",
+                        "img[src*='.jpeg']", 
                         "img[src*='.png']",
                         "img[src*='.webp']",
-                        "img[data-src]",
-                        "img[src]"
+                        "img[data-src*='.jpg']",
+                        "img[data-src*='.jpeg']",
+                        "img[data-src*='.png']",
+                        "img[data-src*='.webp']"
                     ]
                     
-                    for selector in img_selectors:
-                        imgs = gallery.find_elements(By.CSS_SELECTOR, selector)
-                        if imgs:
-                            for img in imgs:
-                                src = img.get_attribute("src") or img.get_attribute("data-src")
-                                if src and "preview-video" not in (img.get_attribute("class") or ""):
-                                    if src.startswith("//"):
-                                        src = "https:" + src
-                                    # Очищаем URL от параметров размера
-                                    src = re.sub(r"small_pic/[^/]*/", "", src)
-                                    src = re.sub(r"\?.*$", "", src)  # Убираем параметры после ?
-                                    if src not in image_urls:  # Избегаем дубликатов
-                                        image_urls.append(src)
-                                        logger.info(f"Получено изображение: {src}")
-                            if image_urls:  # Если нашли изображения, прекращаем поиск
-                                break
-                
-                logger.info(f"Получено {len(image_urls)} изображений")
+                    for selector in image_selectors:
+                        try:
+                            images = gallery.find_elements(By.CSS_SELECTOR, selector)
+                            for img in images:
+                                # Пробуем разные атрибуты для получения URL
+                                img_url = None
+                                for attr in ['src', 'data-src', 'data-original']:
+                                    try:
+                                        img_url = img.get_attribute(attr)
+                                        if img_url and img_url.startswith('http'):
+                                            break
+                                    except:
+                                        continue
+                                
+                                if img_url and img_url not in image_urls:
+                                    image_urls.append(img_url)
+                                    logger.info(f"Добавлено изображение: {img_url}")
+                        except Exception as e:
+                            logger.debug(f"Ошибка при извлечении изображений по селектору {selector}: {str(e)}")
+                            continue
+                else:
+                    logger.warning(f"Галерея не найдена для товара {url}")
                 
             except Exception as e:
                 logger.error(f"Ошибка при извлечении изображений: {str(e)}")
@@ -376,6 +419,9 @@ class Parser:
             # Получаем характеристики
             characteristics = self.get_specifications_from_spec_page(driver, url)
             
+            # Обрабатываем дублирующиеся названия характеристик
+            processed_characteristics = self.process_duplicate_characteristics(characteristics)
+            
             # Формируем строку с информацией о товаре
             product_info_parts = [
                 f"Артикул: {product_code}",
@@ -383,27 +429,29 @@ class Parser:
             ]
             
             # Добавляем характеристики
-            if characteristics:
-                for group_name, group_specs in characteristics.items():
+            if processed_characteristics:
+                for group_name, group_specs in processed_characteristics.items():
                     for spec_name, spec_value in group_specs.items():
                         # Если значение - список, объединяем через запятую
                         if isinstance(spec_value, list):
                             spec_value = ", ".join(spec_value)
+                        # Удаляем кавычки из значения
+                        if isinstance(spec_value, str):
+                            spec_value = spec_value.replace('"', '').replace('"', '').replace('"', '')
                         product_info_parts.append(f"{spec_name}: {spec_value}")
             
             # Добавляем изображения
-            if image_urls:
-                product_info_parts.append(f"Изображения: {', '.join(image_urls)}")
+            # if image_urls:
+            #     product_info_parts.append(f"Изображения: {', '.join(image_urls)}")
             
             # Объединяем все части в одну строку
             product_info = "\n".join(product_info_parts)
             
             return {
-                "url": url,
                 "title": title,
                 "product_code": product_code,
                 "image_urls": image_urls,
-                "characteristics": characteristics,
+                "characteristics": processed_characteristics,
                 "product_info": product_info
             }
             
@@ -452,6 +500,7 @@ class Parser:
                     # Находим элементы характеристик внутри группы
                     items = group.find_elements(By.CSS_SELECTOR, "dl.characteristics__list > mvid-item-with-dots")
                     group_specs = {}
+                    used_names_in_group = set()  # Отслеживаем использованные названия в группе
                     
                     for item in items:
                         try:
@@ -493,6 +542,18 @@ class Parser:
                                     continue
                             
                             if name and value:
+                                # Обрабатываем дублирующиеся названия в группе
+                                original_name = name
+                                counter = 1
+                                while name in used_names_in_group:
+                                    name = f"{original_name} {counter}"
+                                    counter += 1
+                                
+                                # Логируем, если название было изменено
+                                if name != original_name:
+                                    logger.info(f"Дублирующееся название характеристики '{original_name}' переименовано в '{name}' (значение: {value})")
+                                
+                                used_names_in_group.add(name)
                                 group_specs[name] = value
                                 logger.info(f"Добавлена характеристика: {name} = {value}")
                             else:
@@ -567,17 +628,36 @@ class Parser:
                 except Exception as e:
                     logger.error(f"Ошибка при обработке батча: {str(e)}")
 
-    def send_to_api(self, product_info: str, product_code: str) -> None:
+    def save_processed_urls(self) -> None:
+        """Сохранение списка обработанных URL в файл"""
+        thread_id = get_thread_id()
+        try:
+            # Создаем директорию data, если её нет
+            os.makedirs('data', exist_ok=True)
+            
+            # Сохраняем множество URL в файл
+            with open('data/processed_urls.json', 'w', encoding='utf-8') as f:
+                json.dump(list(self.processed_urls), f, ensure_ascii=False, indent=2)
+            
+            logger.info(f"[Thread-{thread_id}] Сохранено {len(self.processed_urls)} обработанных URL в файл")
+        except Exception as e:
+            logger.error(f"[Thread-{thread_id}] Ошибка при сохранении обработанных URL: {str(e)}")
+
+    def send_to_api(self, product_info: str, product_code: str, image_urls: List[str] = None) -> None:
         """Отправка данных о товаре на API"""
         thread_id = get_thread_id()
         try:
             url = "https://duomind.ru/api/product-card"
+            
+            # В img отправляем все url через запятую
+            img_url = ", ".join(image_urls) if image_urls else ""
+            
             payload = {
                 "product_info": product_info,
                 "ean": product_code,
                 "source": "МВидео",
                 "template_id": 0,
-                "img": "",
+                "img": img_url,
                 "parsing_result": {},
                 "check_result": {}
             }
@@ -587,11 +667,13 @@ class Parser:
                 'User-Agent': self.get_random_user_agent()
             }
             
-            logger.info(f"[Thread-{thread_id}] Отправка данных на API для товара {product_code}")
+            logger.info(f"[Thread-{thread_id}] Отправка данных на API для товара {product_code}. Payload: {json.dumps(payload, ensure_ascii=False)}")
             response = requests.post(url, json=payload, headers=headers, timeout=30)
             
             if response.status_code == 200:
                 logger.info(f"[Thread-{thread_id}] Успешная отправка данных на API. Ответ: {response.text}")
+                # Сохраняем обработанные URL после успешной отправки
+                self.save_processed_urls()
             else:
                 logger.error(f"[Thread-{thread_id}] Ошибка при отправке данных на API. Статус: {response.status_code}, Ответ: {response.text}")
                 
@@ -639,7 +721,8 @@ class Parser:
                         # Отправляем данные на API
                         self.send_to_api(
                             product_info=product_info["product_info"],
-                            product_code=product_info["product_code"]
+                            product_code=product_info["product_code"],
+                            image_urls=product_info["image_urls"]
                         )
                     else:
                         logger.error(f"Не удалось получить информацию о товаре {current_item_number} из {total_items}: {url}")

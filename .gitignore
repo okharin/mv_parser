@@ -50,4 +50,5 @@ results.json
 # Data files
 data/product_links.json
 data/parsing_status.json
-data/url_update_status.json 
+data/url_update_status.json
+data/processed_urls.json 

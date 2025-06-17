@@ -49,3 +49,4 @@ pip install -r requirements.txt
 ```
 
 2. Установите Chrome/Chromium браузер
+ 
